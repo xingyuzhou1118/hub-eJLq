@@ -21,7 +21,7 @@ model.fit(input_feature,dataset['label'].values)
 
 #使用大模型对文本进行分类
 client = OpenAI(
-    api_key = "sk-91f5996ed4c14d619008a65ab636f1a2",
+    api_key = "sk-91f5996ed4xxxxx5ab636f1a2",
     base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1",# 大模型厂商的地址，阿里云
 
 )
