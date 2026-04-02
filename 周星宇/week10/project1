@@ -1,0 +1,37 @@
+from transformers import ChineseCLIPProcessor, ChineseCLIPModel
+import torch
+from PIL import Image
+
+# 1. 加载模型和处理器
+model = ChineseCLIPModel.from_pretrained("OFA-Sys/chinese-clip-vit-base-patch16")
+processor = ChineseCLIPProcessor.from_pretrained("OFA-Sys/chinese-clip-vit-base-patch16")
+
+# 2. 加载并预处理图像
+image_path = r"C:\Users\邶风\Pictures\图片\柯基.jpg" 
+image = Image.open(image_path)
+
+# 3. 定义候选中文类别
+candidate_labels = ["一只狗", "一只猫", "一辆汽车", "一只鸟", "一只兔子", "一个玩具"]
+
+# 4. 使用 processor 同时处理图像和文本
+inputs = processor(
+    text=candidate_labels,
+    images=image,
+    return_tensors="pt",
+    padding=True
+)
+
+# 5. 模型推理
+with torch.no_grad():
+    outputs = model(**inputs)
+    logits_per_image = outputs.logits_per_image  # 图像对每个文本的相似度得分
+    probs = logits_per_image.softmax(dim=1)      # 转为概率分布
+
+# 6. 输出结果
+probs = probs[0].tolist()  # 转为普通列表
+for label, prob in zip(candidate_labels, probs):
+    print(f"{label}: {prob:.4f}")
+
+# 找出最可能的类别
+predicted_idx = probs.index(max(probs))
+print(f"\n预测结果: {candidate_labels[predicted_idx]} (置信度: {max(probs):.4f})")
