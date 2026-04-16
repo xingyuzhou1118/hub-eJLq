@@ -1,0 +1,391 @@
+import traceback
+from datetime import datetime
+import streamlit as st
+from agents.mcp.server import MCPServerSse
+import asyncio
+from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel, SQLiteSession, RunConfig, ModelSettings
+from openai.types.responses import ResponseTextDeltaEvent, ResponseCreatedEvent, ResponseOutputItemDoneEvent, \
+    ResponseFunctionToolCall
+from agents.mcp import MCPServer, ToolFilterStatic, ToolFilterCallable
+from agents import set_default_openai_api, set_tracing_disabled
+import json
+import requests
+from typing import Dict, Any
+
+# OpenAI-agent settings
+set_default_openai_api("chat_completions")
+set_tracing_disabled(True)
+
+st.set_page_config(page_title="企业职能机器人")
+
+# SQLite session for conversation
+session = SQLiteSession("conversation_123")
+
+# 自定义工具定义
+def get_employee_info(employee_id: str) -> Dict[str, Any]:
+    """
+    获取员工信息的自定义工具
+    """
+    # 模拟数据库查询
+    employees_db = {
+        "E001": {
+            "name": "张三",
+            "department": "技术部",
+            "position": "高级工程师",
+            "email": "zhangsan@company.com",
+            "phone": "13800138001",
+            "hire_date": "2022-03-15"
+        },
+        "E002": {
+            "name": "李四",
+            "department": "销售部",
+            "position": "销售经理",
+            "email": "lisi@company.com",
+            "phone": "13800138002",
+            "hire_date": "2021-07-20"
+        },
+        "E003": {
+            "name": "王五",
+            "department": "人事部",
+            "position": "HR专员",
+            "email": "wangwu@company.com",
+            "phone": "13800138003",
+            "hire_date": "2023-01-10"
+        }
+    }
+    
+    employee = employees_db.get(employee_id.upper())
+    if employee:
+        return {
+            "status": "success",
+            "employee_info": employee
+        }
+    else:
+        return {
+            "status": "error",
+            "message": f"未找到员工ID为 {employee_id} 的信息"
+        }
+
+def calculate_overtime_pay(hours_worked: float, hourly_rate: float, overtime_multiplier: float = 1.5) -> Dict[str, Any]:
+    """
+    计算加班费的自定义工具
+    """
+    if hours_worked <= 0 or hourly_rate <= 0:
+        return {
+            "status": "error",
+            "message": "工作小时数和时薪必须大于0"
+        }
+    
+    regular_hours = min(hours_worked, 8)  # 假设每天8小时为正常工作时间
+    overtime_hours = max(0, hours_worked - 8)
+    
+    regular_pay = regular_hours * hourly_rate
+    overtime_pay = overtime_hours * hourly_rate * overtime_multiplier
+    total_pay = regular_pay + overtime_pay
+    
+    return {
+        "status": "success",
+        "regular_hours": regular_hours,
+        "overtime_hours": overtime_hours,
+        "regular_pay": round(regular_pay, 2),
+        "overtime_pay": round(overtime_pay, 2),
+        "total_pay": round(total_pay, 2)
+    }
+
+def check_project_status(project_id: str) -> Dict[str, Any]:
+    """
+    检查项目状态的自定义工具
+    """
+    # 模拟项目数据库
+    projects_db = {
+        "PROJ001": {
+            "project_name": "客户管理系统升级",
+            "status": "进行中",
+            "start_date": "2026-02-01",
+            "end_date": "2026-05-30",
+            "progress": 65,
+            "team_lead": "张三",
+            "budget_used": 125000,
+            "total_budget": 200000
+        },
+        "PROJ002": {
+            "project_name": "移动应用开发",
+            "status": "已完成",
+            "start_date": "2025-10-15",
+            "end_date": "2026-03-30",
+            "progress": 100,
+            "team_lead": "李四",
+            "budget_used": 180000,
+            "total_budget": 185000
+        },
+        "PROJ003": {
+            "project_name": "数据分析平台搭建",
+            "status": "规划中",
+            "start_date": "2026-05-01",
+            "end_date": "2026-11-30",
+            "progress": 10,
+            "team_lead": "王五",
+            "budget_used": 15000,
+            "total_budget": 300000
+        }
+    }
+    
+    project = projects_db.get(project_id.upper())
+    if project:
+        return {
+            "status": "success",
+            "project_info": project
+        }
+    else:
+        return {
+            "status": "error",
+            "message": f"未找到项目ID为 {project_id} 的信息"
+        }
+
+# 工具描述
+CUSTOM_TOOLS_DESC = [
+    {
+        "name": "get_employee_info",
+        "description": "获取员工信息，包括姓名、部门、职位、联系方式等",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "employee_id": {
+                    "type": "string",
+                    "description": "员工ID，如 E001"
+                }
+            },
+            "required": ["employee_id"]
+        }
+    },
+    {
+        "name": "calculate_overtime_pay",
+        "description": "计算加班费，基于工作小时数和时薪",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "hours_worked": {
+                    "type": "number",
+                    "description": "总工作小时数"
+                },
+                "hourly_rate": {
+                    "type": "number",
+                    "description": "每小时工资"
+                },
+                "overtime_multiplier": {
+                    "type": "number",
+                    "description": "加班费倍数，默认1.5"
+                }
+            },
+            "required": ["hours_worked", "hourly_rate"]
+        }
+    },
+    {
+        "name": "check_project_status",
+        "description": "检查项目状态，包括进度、负责人、预算等信息",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "project_id": {
+                    "type": "string",
+                    "description": "项目ID，如 PROJ001"
+                }
+            },
+            "required": ["project_id"]
+        }
+    }
+]
+
+# Sidebar
+with st.sidebar:
+    st.title('职能AI+智能问答')
+    if 'API_TOKEN' in st.session_state and len(st.session_state['API_TOKEN']) > 1:
+        st.success('API Token已经配置', icon='✅')
+        key = st.session_state['API_TOKEN']
+    else:
+        key = "sk-399b434c3f5b4329a4600ec76ce4f7cc"
+
+    key = st.text_input('输入API KEY:', type='password', value=key)
+    st.session_state['API_TOKEN'] = key # 网页缓存
+
+    model_name = st.selectbox("选择模型", ["qwen-flash", "qwen-max"])
+    use_tool = st.checkbox("使用工具", value=True)
+
+
+# Initial chat messages
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "system", "content": """你好，我是企业职能助手，可以AI对话也可以调用内部工具。
+        我可以帮你：
+        1. 查询员工信息 (例如：请查询员工E001的信息)
+        2. 计算加班费 (例如：计算8小时工作，每小时50元的加班费)
+        3. 检查项目状态 (例如：请检查PROJ001项目的状态)
+        4. 查询天气和新闻等原有功能"""}
+    ]
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]): # 对话角色
+        st.write(message["content"]) # 对外输出
+
+
+def clear_chat_history():
+    st.session_state.messages = [
+        {"role": "system", "content": """你好，我是企业职能助手，可以AI对话也可以调用内部工具。
+        我可以帮你：
+        1. 查询员工信息 (例如：请查询员工E001的信息)
+        2. 计算加班费 (例如：计算8小时工作，每小时50元的加班费)
+        3. 检查项目状态 (例如：请检查PROJ001项目的状态)
+        4. 查询天气和新闻等原有功能"""}
+    ]
+    global session
+    session = SQLiteSession("conversation_123")
+
+
+st.sidebar.button('清空聊天', on_click=clear_chat_history)
+
+
+# ----------------------------
+#   Streaming + RawEvent Logic
+# ----------------------------
+def mcp_enterprise_callable_filter(context, tool) -> bool:
+    allowed_tools = [
+        "get_today_daily_news", 
+        "get_github_hot_news",
+        "get_city_weather", 
+        "sentiment_classification",
+        "get_employee_info",
+        "calculate_overtime_pay", 
+        "check_project_status"
+    ]
+    return tool.name in allowed_tools
+
+# 动态的工具的选择
+async def get_model_response3(prompt, model_name, use_tool):
+    mcp_server1 = MCPServerSse(
+        name="SSE Python Server",
+        params={"url": "http://localhost:8900/sse"},
+        cache_tools_list=False,
+        tool_filter=mcp_enterprise_callable_filter,
+        client_session_timeout_seconds=20,
+    )
+
+    external_client = AsyncOpenAI(
+        api_key=key,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    async with mcp_server1:
+
+        if use_tool:
+            enterprise_agent = Agent(
+                name="Enterprise Assistant",
+                instructions=f"""你是一个企业职能助手，可以使用多种工具帮助用户：
+                1. get_employee_info(employee_id): 查询员工信息
+                2. calculate_overtime_pay(hours_worked, hourly_rate, overtime_multiplier): 计算加班费
+                3. check_project_status(project_id): 检查项目状态
+                4. 以及其他内置工具如天气查询、新闻获取等。
+                
+                根据用户请求选择合适的工具。
+                
+                已知的自定义工具描述:
+                {json.dumps(CUSTOM_TOOLS_DESC, ensure_ascii=False, indent=2)}
+                """,
+                mcp_servers=[mcp_server1],
+                model=OpenAIChatCompletionsModel(
+                    model=model_name,
+                    openai_client=external_client,
+                ),
+                model_settings=ModelSettings(parallel_tool_calls=False)
+            )
+            
+            agent = enterprise_agent
+        else:
+            agent = Agent(
+                name="Assistant",
+                instructions="你是一个企业职能助手，提供信息查询和解答服务。",
+                model=OpenAIChatCompletionsModel(
+                    model=model_name,
+                    openai_client=external_client,
+                )
+            )
+
+        result = Runner.run_streamed(agent, input=prompt, session=session, run_config=RunConfig(model_settings=ModelSettings(parallel_tool_calls=False)))
+
+        async for event in result.stream_events():
+            print(datetime.now(), "111", event)
+
+            if event.type == "raw_response_event" and hasattr(event, 'data') and isinstance(event.data, ResponseOutputItemDoneEvent):
+                print(datetime.now(), "222", event)
+                if isinstance(event.data.item, ResponseFunctionToolCall):
+                    yield "argument", event.data.item
+
+            if event.type == "run_item_stream_event" and hasattr(event, 'name') and event.name == "tool_output":
+                print(datetime.now(), "333", event)
+                yield "raw", event.item.raw_item["output"]
+
+            if event.type == "raw_response_event" and hasattr(event, 'data') and isinstance(event.data, ResponseTextDeltaEvent):
+                print(datetime.now(), "444", event)
+                yield "content", event.data.delta
+
+
+# ----------------------------
+#    Chat Interaction
+# ----------------------------
+if len(key) > 1:
+    if prompt := st.chat_input(): # 得到用户输入，判断输入是否为空
+        # Display user message
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+        # 用户的角色暂时用户的输入
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Display assistant streaming reply
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+
+            with st.spinner("请求中..."):
+                try:
+                    # 把 streaming consumer 放成一个独立的 async 函数（使用局部 accumulated_text）
+                    async def stream_output():
+                        accumulated_text = ""
+
+                        # 生成结果的迭代器
+                        # 使用get_model_response3，支持动态工具筛选
+                        response_generator = get_model_response3(prompt, model_name, use_tool)
+
+                        async for event_type, chunk in response_generator:
+
+                            # Raw event（原始 delta），把它格式化为 code block，方便查看
+                            if event_type == "argument":
+                                # chunk 可能是 dict/list/其他对象 —— 转成字符串以防报错
+                                formatted_raw = f"\n\n```json\n[调用工具参数]\n{str(chunk)}\n```\n"
+                                accumulated_text += formatted_raw
+                                placeholder.markdown(accumulated_text + "▌")
+
+                            elif event_type == "raw":
+                                # chunk 可能是 dict/list/其他对象 —— 转成字符串以防报错
+                                formatted_raw = f"\n\n```json\n[工具执行结果]\n{str(chunk)}\n```\n"
+                                accumulated_text += formatted_raw
+                                placeholder.markdown(accumulated_text + "▌")
+
+                            # 模型输出文本
+                            elif event_type == "content":
+                                # chunk 应该是 str（文本片段）
+                                accumulated_text += chunk
+                                placeholder.markdown(accumulated_text + "▌")
+
+                        return accumulated_text
+
+                    # 在同步上下文中运行 async generator
+                    final_text = asyncio.run(stream_output())
+                    # 最终渲染（去掉游标）
+                    placeholder.markdown(final_text)
+
+                except Exception as e:
+                    error_msg = f"发生错误: {e}"
+                    placeholder.error(error_msg)
+                    final_text = error_msg
+                    traceback.print_exc()
+
+            # Save assistant reply to session state
+            st.session_state.messages.append({"role": "assistant", "content": final_text})
